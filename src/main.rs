@@ -4,7 +4,7 @@ use std::io::Cursor;
 use std::io::{SeekFrom, BufReader};
 use chrono::prelude::*;
 use chrono::Duration;
-use hdf5::{File as HFile, H5Type, Result};
+use hdf5::{File as HFile, Group, H5Type, Result};
 use std::{thread, time};
 use std::mem;
 use std::fs::File;
@@ -12,16 +12,17 @@ use std::io::prelude::*;
 use std::sync::mpsc::{channel, Sender, Receiver};
 
 
-const samples: usize = 512;
-const test_file: &str = "/home/storm/Desktop/hdf5rustlocal/example_register";
-const adc_offset: u64 = 160;
-const adc_length: u64 = 128;
-const adc_num: u64= 10;
-const runtime: i64 = 1;
-const adc_offsets: [u64;  adc_num as usize] = [160, 240, 176, 256, 192, 272, 208, 288, 224, 304];
-const active_pulse_offset: u64 = 70;
-const total_pulse_offset: u64 = 71;
-const state_offset: u64 = 66;
+const samples: usize = 512; //Number of samples in each array
+const test_file: &str = "/home/storm/Desktop/hdf5rustlocal/example_register"; //Location of test-register
+const adc_offset: u64 = 160; //Offset to first ADC array
+const adc_length: u64 = 128; //Offset between ADC arrays
+const adc_num: u64= 10; //Number of ADCs
+const runtime: i64 = 1; //Runtime in minutes
+const adc_offsets: [u64;  adc_num as usize] = [160, 240, 176, 256, 192, 272, 208, 288, 224, 304]; //Offsets for each ADC
+const active_pulse_offset: u64 = 70; //Offset for active pulse registry
+const total_pulse_offset: u64 = 71; //Offset for total pulse registry
+const state_offset: u64 = 66; //Offset for stat
+const chunk_size: usize = 512; //HDF5 chunk size
 
 
 #[derive(Debug)]
@@ -105,39 +106,6 @@ fn main() -> std::io::Result<()> {
     Ok(())
 
     /*
-    //Preparing everything
-    let start: DateTime<Utc> = Utc::now();
-    let stop: DateTime<Utc> = start+Duration::minutes(5);
-    let hdffile = File::create(&start.format("/home/storm/Desktop/hdf5rustlocal/%Y-%m-%d %H:%M:%S.h5").to_string())?;
-    let mut count :u64 = 0;
-    
-    let array = create_test_buffer();
-    let mut test_buffer = Cursor::new(&array[..]);
-    loop {
-        let utc: DateTime<Utc> = Utc::now();
-        let shot_start = time::Instant::now();
-        count += 1;
-        test_buffer.rewind(); //Rewind buffer to start
-
-        //Read sequentially
-        let wave_1 = read_waveform_from_cursor(512, &mut test_buffer);
-        //test_buffer.rewind();
-        let wave_2 = read_waveform_from_cursor(512, &mut test_buffer);
-        let wave_3 = read_waveform_from_cursor(512, &mut test_buffer);
-        let wave_4 = read_waveform_from_cursor(512, &mut test_buffer);
-        let wave_5 = read_waveform_from_cursor(512, &mut test_buffer);
-
-        //Store in struct
-        let data = FpgaData {
-            count: count,
-            timestamp: (utc.timestamp(), utc.timestamp_subsec_nanos()),
-            wave_1: wave_1,
-            wave_2: wave_2,
-            wave_3: wave_3,
-            wave_4: wave_4,
-            wave_5: wave_5
-        };
-        //Create new group with timestamp as name
         let chunk_size = 256;
         let wave_group = hdffile.create_group(&utc.format("%Y-%m-%d %H:%M:%S.%f").to_string())?;
         let builder = wave_group
@@ -148,39 +116,6 @@ fn main() -> std::io::Result<()> {
             .with_data(&data.wave_1)
             .create("wave_1")?;
 
-        //println!("{:?}", ds);
-        //let builder = wave_group.new_dataset_builder();
-        let builder = wave_group
-            .new_dataset_builder()
-            .chunk((chunk_size));
-
-        let ds = builder
-            .with_data(&data.wave_2)
-            .create("wave_2");
-        //let builder = wave_group.new_dataset_builder();
-        let builder = wave_group
-            .new_dataset_builder()
-            .chunk((chunk_size));
-
-        let ds = builder
-            .with_data(&data.wave_3)
-            .create("wave_3");
-        //let builder = wave_group.new_dataset_builder();
-        let builder = wave_group
-            .new_dataset_builder()
-            .chunk((chunk_size));
-
-        let ds = builder
-            .with_data(&data.wave_4)
-            .create("wave_4");
-        //let builder = wave_group.new_dataset_builder();
-        let builder = wave_group
-            .new_dataset_builder()
-            .chunk((chunk_size));
-
-        let ds = builder
-            .with_data(&data.wave_5)
-            .create("wave_5");
         let dur: [u64; 1] = [shot_start.elapsed().as_micros() as u64];
         let attr = wave_group.new_attr::<u64>().shape([1]).create("shot_duration")?;
         attr.write(&dur)?;
@@ -203,34 +138,66 @@ fn main() -> std::io::Result<()> {
     Ok(())*/
 }
 
-/*fn write_data_hdf5(hdffile: &File, data: FpgaData) -> Result<i32> {
-    let write_start: DateTime<Utc> = Utc::now();
-    hdffile.create_group(&write_start.format("%Y-%m-%d %H:%M:%S.%f").to_string())?;
+fn write_data_hdf5(hdffile: &HFile, data: DataContainer) {
+    let write_start = time::Instant::now();
+    let timestamp = &data.datetime.format("%Y-%m-%d %H:%M:%S.%f").to_string();
+    let hdfgroup = hdffile.create_group(timestamp).unwrap();
 
-    Ok((0))
-}*/
+    //Write attributes
+
+    let attr = hdfgroup.new_attr::<u64>().shape([1]).create("internal_count").unwrap();
+    attr.write(&[data.internal_count]).unwrap();
+
+    let attr = hdfgroup.new_attr::<u64>().shape([1]).create("active_pulse").unwrap();
+    attr.write(&[data.active_pulse]).unwrap();
+
+    let attr = hdfgroup.new_attr::<u64>().shape([1]).create("total_pulse").unwrap();
+    attr.write(&[data.total_pulse]).unwrap();
+
+    let attr = hdfgroup.new_attr::<u64>().shape([1]).create("datetime").unwrap();
+    attr.write(&[data.datetime.timestamp_nanos()]).unwrap();
+
+    let ds_builder = hdfgroup
+        .new_dataset_builder()
+        .chunk((chunk_size));
+    let ds = ds_builder
+        .with_data(&data.kly_fwd_pwr)
+        .create("kly_fws_pwr");
+
+    let write_dur: [u64; 1] = [write_start.elapsed().as_micros() as u64];
+
+    let attr = hdfgroup.new_attr::<u64>().shape([1]).create("write_duration").unwrap();
+    attr.write(&write_dur).unwrap();
+}
 
 fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<DataContainer>) {
     let mut thread_counter = 0;
+    let start: DateTime<Utc> = Utc::now();
+    let hdffile = HFile::create(&start.format("/home/storm/Desktop/hdf5rustlocal/%Y-%m-%d %H:%M:%S.h5").to_string()).unwrap();
+
     loop {
         //println!("Thread is here!");
         thread_counter += 1;
         let received_data = datareceiver.recv_timeout(time::Duration::from_millis(25)).unwrap();
-        thread::sleep(time::Duration::from_millis(100));
+        write_data_hdf5(&hdffile, received_data);
+        if thread_counter % 100 == 0
+        {
+            hdffile.flush();
+        }
         let _ctrl = controlreceiver.try_recv();
         if  _ctrl.is_ok() {
-            loop {
+            let _recv = loop {
+                thread_counter += 1;
                 let _recv = datareceiver.try_recv();
                 if _recv.is_err(){
                     break;
                 }
-                else
+                else if _recv.is_ok()
                 {
-                    let received_data = _recv.unwrap();
+                    write_data_hdf5(&hdffile, _recv.unwrap());
                     println!("Still receiving data!!!!")
                 }
-            }
-            println!("{:?}", received_data);
+            };
             println!("Quitting after {} loops", thread_counter);
             break;
         }
