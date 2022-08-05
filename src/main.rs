@@ -104,38 +104,6 @@ fn main() -> std::io::Result<()> {
     let _send_status = controlsender.send(true).unwrap();
     handler.join();
     Ok(())
-
-    /*
-        let chunk_size = 256;
-        let wave_group = hdffile.create_group(&utc.format("%Y-%m-%d %H:%M:%S.%f").to_string())?;
-        let builder = wave_group
-            .new_dataset_builder()
-            .chunk((chunk_size));
-        //let builder = wave_group.new_dataset_builder();
-        let ds = builder
-            .with_data(&data.wave_1)
-            .create("wave_1")?;
-
-        let dur: [u64; 1] = [shot_start.elapsed().as_micros() as u64];
-        let attr = wave_group.new_attr::<u64>().shape([1]).create("shot_duration")?;
-        attr.write(&dur)?;
-        //println!("shot took {} us", dur[0]);
-        if utc > stop {
-            break;
-        }
-        if count % 100 == 0 {
-            println!("shot took {} us", dur[0]);
-        }
-        //if count % 10 == 0 {
-            hdffile.flush()?;
-        //}
-        //TODO: Flush less often
-        thread::sleep(time::Duration::from_micros(2500));
-
-    }
-    
-
-    Ok(())*/
 }
 
 fn write_data_hdf5(hdffile: &HFile, data: DataContainer) {
