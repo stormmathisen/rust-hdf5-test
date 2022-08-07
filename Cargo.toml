@@ -9,6 +9,7 @@ edition = "2021"
 opt-level = 3
 
 [dependencies]
+anyhow = "1.0.60"
 byteorder = "1"
 chrono = "0.4"
 hdf5 = "0.8.1"
