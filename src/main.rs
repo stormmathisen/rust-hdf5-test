@@ -86,16 +86,27 @@ impl IntoIterator for DataContainer {
 fn main() -> Result<()> {
 
     //Initialization
+    //These track when the program started and how long it will run for (currently minutes)
     let prog_start = Utc::now();
     let prog_stop = prog_start+Duration::minutes(RUNTIME);
+
+    //This is the register the code reads from. In the production version, it would be two registers (DMA and BAR2)
     let reg_file = File::open(TEST_FILE)
         .with_context(|| format!("Failed to open {}", TEST_FILE))?;
+    
+    //This is a buffered interface to the open file
     let mut reg_reader = BufReader::new(reg_file);
-    let mut internal_counter: u64 = 0;
+
+    //This is the internal shot counter. At 400Hz this is good for >a billion years
+    let mut internal_counter: u64 = 0; 
 
     //Setup HDF5 thread
+    //The channel is a multi producer, single consumer FIFO buffer. Only one thread can receive, but multiple threads can put data in the channel
+    //We use two, one to send data to the writing thread and one that relies on optimistic receive succeeding to tell the write thread to close
     let (datasender, datareceiver) = channel::<DataContainer>();
     let (controlsender, controlreceiver) = channel::<bool>();
+
+    //This spawns a thread that does hdf5 writing (using a closure)
     let handler = thread::spawn(|| {
         write_hdf5_thread(controlreceiver, datareceiver);
     });
@@ -103,11 +114,12 @@ fn main() -> Result<()> {
     //Main Loop
     loop
     {
+        //Rewind the cursor of the registry file 
         reg_reader.rewind().context("Failed to rewind file!")?;
+        //Store an Instant for faking the rep rate and a DateTime for timestamping the data with the system clock
         let shot_start = time::Instant::now();
-
         let shot_timestamp = Utc::now();
-
+        //Store the data from the register as a structure we can transmit over a channel
         let data_container = DataContainer{
             internal_count: internal_counter,
             datetime: shot_timestamp,
@@ -125,23 +137,30 @@ fn main() -> Result<()> {
             cav_probe_pwr: read_array_offset(ADC_OFFSETS[8], &mut reg_reader),
             cav_probe_pha: read_array_offset(ADC_OFFSETS[9], &mut reg_reader)
         };
+        //Transmit data over the FIFO channel
         let _data_result = datasender.send(data_container).unwrap();
+        //Here we increment the internal counter and print the time elapsed (using the Instant, creating a Duration) every 100 shots
         internal_counter += 1;
         if internal_counter % 100 == 0
         {
             println!("Time elapsed: {} us", shot_start.elapsed().as_micros());
         }
+        //Check if we're meant to stop and break out of the loop if we are
         if shot_timestamp > prog_stop {
             //println!{"{:?}", &data_container}
             break;
         }
+        //This is the fake rep rate, blocking until 2500 microseconds has passed since the start
+        //I'm not sure how the FPGA communicates a trigger interrupt to the CPU card, but this can also just look for changes in the FPGA pulse count register
         while shot_start.elapsed().as_micros() < 2500{
 
         }
 
     }
+    //Once we break out of the loop, we send a shutdown command to the HDF writing thread
     let _send_status = controlsender.send(true)
         .context("Failed to shut down thread with control channel")?;
+    //And then join it to wait for it to finish anything it was doing
     let _handler_status = handler.join();
     Ok(())
 }
