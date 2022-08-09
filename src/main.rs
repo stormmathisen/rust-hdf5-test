@@ -17,12 +17,14 @@ use anyhow::{Result, Context};
 //TODO: Error handling at all .unwrap()
 
 const SAMPLES: usize = 512; //Number of samples in each array
-const TEST_FILE: &str = "/home/storm/Desktop/hdf5rustlocal/example_register"; //Location of test-register
+//const TEST_FILE: &str = "/home/storm/Desktop/hdf5rustlocal/example_register"; //Location of test-register
+const BAR1_FNAME: &str = "/home/storm/Desktop/hdf5rustlocal/pcie_bar1_s5";
+const DMA_FNAME: &str = "/home/storm/Desktop/hdf5rustlocal/pcie_dma_s5";
 const NAS_LOC: &str = "/home/storm/Desktop/hdf5rustlocal/"; //Location to move hdf5 files at midnight
 const ADC_OFFSET: u64 = 160; //Offset to first ADC array
 const ADC_LENGTH: u64 = 128; //Offset between ADC arrays
 const ADC_NUM: u64= 10; //Number of ADCs
-const RUNTIME: i64 = 1; //Runtime in minutes
+const RUNTIME: i64 = 10*60; //Runtime in minutes
 const ADC_OFFSETS: [u64;  ADC_NUM as usize] = [160, 240, 176, 256, 192, 272, 208, 288, 224, 304]; //Offsets for each ADC
 const ACTIVE_PULSE_OFFSET: u64 = 70; //Offset for active pulse registry
 const TOTAL_PULSE_OFFSET: u64 = 71; //Offset for total pulse registry
@@ -91,11 +93,19 @@ fn main() -> Result<()> {
     let prog_stop = prog_start+Duration::minutes(RUNTIME);
 
     //This is the register the code reads from. In the production version, it would be two registers (DMA and BAR2)
-    let reg_file = File::open(TEST_FILE)
-        .with_context(|| format!("Failed to open {}", TEST_FILE))?;
+    let dma_file = File::open(DMA_FNAME)
+        .with_context(|| format!("Failed to open {}", DMA_FNAME))?;
     
     //This is a buffered interface to the open file
-    let mut reg_reader = BufReader::new(reg_file);
+    let mut dma_reader = BufReader::new(dma_file);
+
+    let bar1_file = File::open(DMA_FNAME)
+        .with_context(|| format!("Failed to open {}", DMA_FNAME))?;
+
+    //This is a buffered interface to the open file
+    let mut bar1_reader = BufReader::new(bar1_file);
+
+
 
     //This is the internal shot counter. At 400Hz this is good for >a billion years
     let mut internal_counter: u64 = 0; 
@@ -115,7 +125,8 @@ fn main() -> Result<()> {
     loop
     {
         //Rewind the cursor of the registry file 
-        reg_reader.rewind().context("Failed to rewind file!")?;
+        dma_reader.rewind().context("Failed to rewind file!")?;
+        bar1_reader.rewind().context("Failed to rewind file!")?;
         //Store an Instant for faking the rep rate and a DateTime for timestamping the data with the system clock
         let shot_start = time::Instant::now();
         let shot_timestamp = Utc::now();
@@ -123,19 +134,19 @@ fn main() -> Result<()> {
         let data_container = DataContainer{
             internal_count: internal_counter,
             datetime: shot_timestamp,
-            active_pulse: read_register_offset(ACTIVE_PULSE_OFFSET, &mut reg_reader) as u32,
-            total_pulse: read_register_offset(TOTAL_PULSE_OFFSET, &mut reg_reader) as u32,
-            state: read_register_offset(STATE_OFFSET, &mut reg_reader) as u32,
-            kly_fwd_pwr: read_array_offset(ADC_OFFSETS[0], &mut reg_reader),
-            kly_fwd_pha: read_array_offset(ADC_OFFSETS[1], &mut reg_reader),
-            kly_rev_pwr: read_array_offset(ADC_OFFSETS[2], &mut reg_reader),
-            kly_rev_pha: read_array_offset(ADC_OFFSETS[3], &mut reg_reader),
-            cav_fwd_pwr: read_array_offset(ADC_OFFSETS[4], &mut reg_reader),
-            cav_fwd_pha: read_array_offset(ADC_OFFSETS[5], &mut reg_reader),
-            cav_rev_pwr: read_array_offset(ADC_OFFSETS[6], &mut reg_reader),
-            cav_rev_pha: read_array_offset(ADC_OFFSETS[7], &mut reg_reader),
-            cav_probe_pwr: read_array_offset(ADC_OFFSETS[8], &mut reg_reader),
-            cav_probe_pha: read_array_offset(ADC_OFFSETS[9], &mut reg_reader)
+            active_pulse: read_register_offset(ACTIVE_PULSE_OFFSET, &mut bar1_reader) as u32,
+            total_pulse: read_register_offset(TOTAL_PULSE_OFFSET, &mut bar1_reader) as u32,
+            state: read_register_offset(STATE_OFFSET, &mut bar1_reader) as u32,
+            kly_fwd_pwr: read_array_offset(ADC_OFFSETS[0], &mut dma_reader),
+            kly_fwd_pha: read_array_offset(ADC_OFFSETS[1], &mut dma_reader),
+            kly_rev_pwr: read_array_offset(ADC_OFFSETS[2], &mut dma_reader),
+            kly_rev_pha: read_array_offset(ADC_OFFSETS[3], &mut dma_reader),
+            cav_fwd_pwr: read_array_offset(ADC_OFFSETS[4], &mut dma_reader),
+            cav_fwd_pha: read_array_offset(ADC_OFFSETS[5], &mut dma_reader),
+            cav_rev_pwr: read_array_offset(ADC_OFFSETS[6], &mut dma_reader),
+            cav_rev_pha: read_array_offset(ADC_OFFSETS[7], &mut dma_reader),
+            cav_probe_pwr: read_array_offset(ADC_OFFSETS[8], &mut dma_reader),
+            cav_probe_pha: read_array_offset(ADC_OFFSETS[9], &mut dma_reader)
         };
         //Transmit data over the FIFO channel
         let _data_result = datasender.send(data_container).unwrap();
@@ -236,7 +247,7 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
     let mut next_day = start
         .date()
         .succ()
-        .and_hms(0,0,0);
+        .and_hms(0,0, 0);
     
     let mut hdffname = start
         .format("%Y-%m-%d %H:%M:%S.h5")
@@ -260,6 +271,7 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
             let copy_thread = thread::spawn(move || {
                 std::fs::copy(&hdffname, NAS_LOC.to_owned()+&hdffname);
                 println!("Finished copying file!");
+                std::fs::remove_file(&hdffname);
             }
             );
 
@@ -277,7 +289,7 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
         let mut _write_res = write_data_hdf5(&hdffile, received_data)
             .with_context(|| format!("Failed to write hdf5 at {:?}", now));
 
-        if thread_counter % 100 == 0
+        if thread_counter % 10 == 0
         {
             let _flush_res = hdffile.flush().context("Unable to flush hdf5 file");
         }
@@ -298,6 +310,14 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
                     println!("Still receiving data!!!!")
                 }
             };
+            let copy_thread = thread::spawn(move || {
+                std::fs::copy(&hdffname, NAS_LOC.to_owned()+&hdffname);
+                println!("Finished copying file!");
+                std::fs::remove_file(&hdffname);
+            }
+            );
+
+            copy_thread.join();
             println!("Quitting after {} loops", thread_counter);
             break;
         }
