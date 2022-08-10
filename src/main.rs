@@ -1,9 +1,10 @@
 //std imports
 use std::io::prelude::*;
-use std::io::{SeekFrom, BufReader};
+use std::io::{SeekFrom, BufReader, BufWriter};
 use std::{thread, time};
-use std::fs::File;
+use std::fs::{File, write};
 use std::sync::mpsc::{channel, Receiver};
+use std::thread::sleep;
 
 use chrono::prelude::*;
 use chrono::Duration;
@@ -20,16 +21,17 @@ const SAMPLES: usize = 512; //Number of samples in each array
 //const TEST_FILE: &str = "/home/storm/Desktop/hdf5rustlocal/example_register"; //Location of test-register
 const BAR1_FNAME: &str = "/home/storm/Desktop/hdf5rustlocal/pcie_bar1_s5";
 const DMA_FNAME: &str = "/home/storm/Desktop/hdf5rustlocal/pcie_dma_s5";
-const NAS_LOC: &str = "/home/storm/Desktop/hdf5rustlocal/"; //Location to move hdf5 files at midnight
+const NAS_LOC: &str = "/home/storm/Desktop/hdf5rustlocal/NAS"; //Location to move hdf5 files at midnight
+const TMP_LOC: &str = "/home/storm/Desktop/hdf5rustlocal/TMP"; //Location to move hdf5 files at midnight
 const ADC_OFFSET: u64 = 160; //Offset to first ADC array
 const ADC_LENGTH: u64 = 128; //Offset between ADC arrays
 const ADC_NUM: u64= 10; //Number of ADCs
-const RUNTIME: i64 = 10*60; //Runtime in minutes
+const RUNTIME: i64 = 30; //Runtime in minutes
 const ADC_OFFSETS: [u64;  ADC_NUM as usize] = [160, 240, 176, 256, 192, 272, 208, 288, 224, 304]; //Offsets for each ADC
 const ACTIVE_PULSE_OFFSET: u64 = 70; //Offset for active pulse registry
 const TOTAL_PULSE_OFFSET: u64 = 71; //Offset for total pulse registry
 const STATE_OFFSET: u64 = 66; //Offset for stat
-const CHUNK_SIZE: usize = 512; //HDF5 chunk size
+const CHUNK_SIZE: usize = 256; //HDF5 chunk size
 const DATA_FIELD_NAMES: [&str; ADC_NUM as usize] = [
     "kly_fwd_pwr",
     "kly_fwd_pha",
@@ -42,6 +44,10 @@ const DATA_FIELD_NAMES: [&str; ADC_NUM as usize] = [
     "cav_probe_pwr",
     "cav_probe_pha"
 ];
+
+const READ_LOG_FILE: &str = "/home/storm/Desktop/hdf5rustlocal/";
+const WRITE_LOG_FILE: &str = "/home/storm/Desktop/hdf5rustlocal/";
+const COPY_LOG_FILE: &str = "/home/storm/Desktop/hdf5rustlocal/";
 
 
 #[derive(Debug)]
@@ -121,6 +127,26 @@ fn main() -> Result<()> {
         write_hdf5_thread(controlreceiver, datareceiver);
     });
 
+    let empty_array: [u16; SAMPLES] = [0;SAMPLES];
+
+    let mut data_container = DataContainer{
+        internal_count: 0,
+        datetime: Utc::now(),
+        active_pulse: 0,
+        total_pulse: 0,
+        state: 0,
+        kly_fwd_pwr: empty_array,
+        kly_fwd_pha: empty_array,
+        kly_rev_pwr: empty_array,
+        kly_rev_pha: empty_array,
+        cav_fwd_pwr: empty_array,
+        cav_fwd_pha: empty_array,
+        cav_rev_pwr: empty_array,
+        cav_rev_pha: empty_array,
+        cav_probe_pwr: empty_array,
+        cav_probe_pha: empty_array
+    };
+
     //Main Loop
     loop
     {
@@ -131,7 +157,7 @@ fn main() -> Result<()> {
         let shot_start = time::Instant::now();
         let shot_timestamp = Utc::now();
         //Store the data from the register as a structure we can transmit over a channel
-        let data_container = DataContainer{
+        data_container = DataContainer{
             internal_count: internal_counter,
             datetime: shot_timestamp,
             active_pulse: read_register_offset(ACTIVE_PULSE_OFFSET, &mut bar1_reader) as u32,
@@ -154,7 +180,7 @@ fn main() -> Result<()> {
         internal_counter += 1;
         if internal_counter % 100 == 0
         {
-            println!("Time elapsed: {} us", shot_start.elapsed().as_micros());
+            //println!("Time elapsed: {} us", shot_start.elapsed().as_micros());
         }
         //Check if we're meant to stop and break out of the loop if we are
         if shot_timestamp > prog_stop {
@@ -163,10 +189,23 @@ fn main() -> Result<()> {
         }
         //This is the fake rep rate, blocking until 2500 microseconds has passed since the start
         //I'm not sure how the FPGA communicates a trigger interrupt to the CPU card, but this can also just look for changes in the FPGA pulse count register
-        while shot_start.elapsed().as_micros() < 2500{
-
+        let wait_thread = thread::spawn(move ||
+            while shot_start.elapsed().as_micros() < 2500 {}
+        );
+        wait_thread.join();
+        if internal_counter == 5 {
+            let _send_status = controlsender.send(true)
+                .context("Failed to start thread with control channel")?;
         }
-
+        /*loop {
+            let sleep_handler = thread::spawn(|| {
+                thread::sleep(time::Duration::new(0, 1000));
+            });
+            sleep_handler.join();
+            if shot_start.elapsed().as_micros() > 5000 {
+                break;
+            }
+        }*/
     }
     //Once we break out of the loop, we send a shutdown command to the HDF writing thread
     let _send_status = controlsender.send(true)
@@ -242,6 +281,9 @@ fn write_data_hdf5(hdffile: &HFile, data: DataContainer) -> Result<()> {
 }
 
 fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<DataContainer>) {
+    while controlreceiver.try_recv().is_err() {
+
+    }
     let mut thread_counter = 0;
     let start: DateTime<Utc> = Utc::now();
     let mut next_day = start
@@ -249,8 +291,8 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
         .succ()
         .and_hms(0,0, 0);
     
-    let mut hdffname = start
-        .format("%Y-%m-%d %H:%M:%S.h5")
+    let mut hdffname = TMP_LOC.to_owned() + &start
+        .format("%Y-%m-%d %H:%M:%S.%f.h5")
         .to_string();
     let mut hdffile = HFile::create(&hdffname)
         .unwrap();
@@ -258,6 +300,7 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
     loop {
         //println!("Thread is here!");
         let now = Utc::now();
+        let instant = time::Instant::now();
         //Check if past midnight, create new file if yes
         //TODO: Implement move old file to network storage!
         if now > next_day {
@@ -265,7 +308,7 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
                 .date()
                 .succ()
                 .and_hms(0,0,0);
-            
+
             hdffile.close();
 
             let copy_thread = thread::spawn(move || {
@@ -275,8 +318,8 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
             }
             );
 
-            hdffname = now
-                .format("%Y-%m-%d %H:%M:%S.h5")
+            hdffname = TMP_LOC.to_owned() + &now
+                .format("%Y-%m-%d %H:%M:%S.%f.h5")
                 .to_string();
 
             hdffile = HFile::create(&hdffname)
@@ -284,34 +327,36 @@ fn write_hdf5_thread(controlreceiver: Receiver<bool>, datareceiver: Receiver<Dat
             }
         thread_counter += 1;
         let received_data = datareceiver
-            .recv_timeout(time::Duration::from_millis(25)).unwrap();
+            .recv_timeout(time::Duration::from_millis(50));
 
-        let mut _write_res = write_data_hdf5(&hdffile, received_data)
-            .with_context(|| format!("Failed to write hdf5 at {:?}", now));
+            write_data_hdf5(&hdffile, received_data.unwrap())
+                .with_context(|| format!("Failed to write hdf5 at {:?}", now));
+        hdffile.flush();
 
-        if thread_counter % 10 == 0
+        if thread_counter % 100 == 0
         {
-            let _flush_res = hdffile.flush().context("Unable to flush hdf5 file");
+            //let _flush_res = hdffile.flush().context("Unable to flush hdf5 file");
+            println!("On loop {}, last one took {} us", thread_counter, instant.elapsed().as_micros())
         }
 
         let _ctrl = controlreceiver.try_recv();
+
         if  _ctrl.is_ok() {
             let _recv = loop {
                 thread_counter += 1;
                 let _recv = datareceiver
                     .try_recv();
-                if _recv.is_err(){
+                if _recv.is_err() {
                     break;
-                }
-                else if _recv.is_ok()
+                } else if _recv.is_ok()
                 {
-                    _write_res = write_data_hdf5(&hdffile, _recv.unwrap())
-                    .with_context(|| format!("Failed to write hdf5 file at closing"));
+                    let _write_res = write_data_hdf5(&hdffile, _recv.unwrap())
+                        .with_context(|| format!("Failed to write hdf5 file at closing"));
                     println!("Still receiving data!!!!")
                 }
             };
             let copy_thread = thread::spawn(move || {
-                std::fs::copy(&hdffname, NAS_LOC.to_owned()+&hdffname);
+                std::fs::copy(&hdffname, NAS_LOC.to_owned() + &hdffname);
                 println!("Finished copying file!");
                 std::fs::remove_file(&hdffname);
             }
@@ -338,3 +383,21 @@ fn read_register_offset(offset: u64, buffer: &mut BufReader<std::fs::File>) -> u
     let _ret = buffer.read_u64_into::<LittleEndian>(&mut out_buffer).unwrap();
     out_buffer[0]
 }
+
+/*fn log_read_event(event: READ_EVENT, ) {
+    match event {
+        READ_EVENT::ProgramStart{timestamp} => ;
+        READ_EVENT::LogStart{timestamp: DateTime<Utc>};
+        READ_EVENT::FileOpen{timestamp: DateTIme<Utc>, fname: str};
+        READ_EVENT::StartWrite{timestamp: DateTime<Utc>};
+        READ_EVENT::StartupComplete{timestamp: DateTime<Utc>};
+        READ_EVENT::StartLoop{timestamp: DateTime<Utc>};
+        READ_EVENT::LoopComplete{timestamp:DateTIme<Utc>, duration: u128};
+        READ_EVENT::StopLoop{timestamp:DateTIme<Utc>};
+        READ_EVENT::ShutdownCommand{timestamp:DateTime<Utc>};
+        READ_EVENT::ProgramStop{timestamp:DateTIme<Utc>};
+
+    }
+}
+
+fn write_to_log(message: &str, buffer: BufWriter<std::fs::File>)*/
